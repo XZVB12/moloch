@@ -17,7 +17,7 @@
  */
 'use strict';
 
-const MIN_DB_VERSION = 62;
+const MIN_DB_VERSION = 66;
 // ----------------------------------------------------------------------------
 // Modules
 // ----------------------------------------------------------------------------
@@ -50,6 +50,7 @@ try {
   var uuid = require('uuidv4').default;
   var RE2 = require('re2');
   var path = require('path');
+  var contentDisposition = require('content-disposition');
 } catch (e) {
   console.log("ERROR - Couldn't load some dependancies, maybe need to 'npm update' inside viewer directory", e);
   process.exit(1);
@@ -180,7 +181,6 @@ passport.use(new DigestStrategy({ qop: 'auth', realm: Config.get('httpRealm', 'M
     });
   },
   function (options, done) {
-    // TODO:  Should check nonce here
     return done(null, true);
   }
 ));
@@ -285,7 +285,7 @@ app.use(compression());
 app.use(methodOverride());
 
 app.use('/font-awesome', express.static(path.join(__dirname, '/../node_modules/font-awesome'), { maxAge: 600 * 1000 }));
-app.use('/bootstrap', express.static(path.join(__dirname, '/node_modules/bootstrap'), { maxAge: 600 * 1000 }));
+app.use('/bootstrap', express.static(path.join(__dirname, '/../node_modules/bootstrap'), { maxAge: 600 * 1000 }));
 
 app.use('/', express.static(path.join(__dirname, '/public'), { maxAge: 600 * 1000 }));
 
@@ -427,6 +427,9 @@ if (Config.get('passwordSecret')) {
       if (!err && suser && suser.found) {
         req.user.settings = suser._source.settings || {};
         req.user.views = suser._source.views;
+        req.user.columnConfigs = suser._source.columnConfigs;
+        req.user.spiviewFieldConfigs = suser._source.spiviewFieldConfigs;
+        req.user.tableStates = suser._source.tableStates;
       }
       next();
     });
@@ -1024,7 +1027,7 @@ function checkHuntAccess (req, res, next) {
     // an admin can do anything to any hunt
     return next();
   } else {
-    Db.get('hunts', 'hunt', req.params.id, (err, huntHit) => {
+    Db.getHunt(req.params.id, (err, huntHit) => {
       if (err) {
         console.log('error', err);
         return res.molochError(500, err);
@@ -1347,8 +1350,8 @@ function getSettingUserCache (req, res, next) {
   Db.getUserCache(req.query.userId, function (err, user) {
     if (err || !user || !user.found) {
       if (app.locals.noPasswordSecret) {
-        // TODO: send anonymous user's settings
-        req.settingUser = {};
+        req.settingUser = JSON.parse(JSON.stringify(req.user));
+        delete req.settingUser.found;
       } else {
         req.settingUser = null;
       }
@@ -1381,8 +1384,8 @@ function getSettingUserDb (req, res, next) {
   Db.getUser(userId, function (err, user) {
     if (err || !user || !user.found) {
       if (app.locals.noPasswordSecret) {
-        // TODO: send anonymous user's settings
-        req.settingUser = {};
+        req.settingUser = JSON.parse(JSON.stringify(req.user));
+        delete req.settingUser.found;
       } else {
         return res.molochError(403, 'Unknown user');
       }
@@ -2274,8 +2277,8 @@ app.post('/user/password/change', [noCacheJson, checkCookieToken, logAction(), g
     return res.molochError(403, 'New password needs to be at least 3 characters');
   }
 
-  if (!req.user.createEnabled && (req.user.passStore !==
-     Config.pass2store(req.token.userId, req.body.currentPassword) ||
+  if (!req.user.createEnabled && (Config.store2ha1(req.user.passStore) !==
+     Config.store2ha1(Config.pass2store(req.token.userId, req.body.currentPassword)) ||
      req.token.userId !== req.user.userId)) {
     return res.molochError(403, 'Current password mismatch');
   }
@@ -3221,7 +3224,7 @@ function sessionsListFromIds (req, ids, fields, cb) {
   let fixFields = nonArrayFields.filter(function (x) { return fields.indexOf(x) !== -1; });
 
   async.eachLimit(ids, 10, function (id, nextCb) {
-    Db.getWithOptions(Db.sid2Index(id), 'session', Db.sid2Id(id), { _source: fields.join(',') }, function (err, session) {
+    Db.getSession(id, { _source: fields.join(',') }, function (err, session) {
       if (err) {
         return nextCb(null);
       }
@@ -3778,8 +3781,9 @@ function checkEsAdminUser (req, res, next) {
 }
 
 app.get('/esadmin/list', [noCacheJson, recordResponseTime, checkEsAdminUser, setCookie], (req, res) => {
-  Promise.all([Db.getClusterSettings({ flatSettings: true, include_defaults: true })
-  ]).then(([settings]) => {
+  Promise.all([Db.getClusterSettings({ flatSettings: true, include_defaults: true }),
+               Db.getILMPolicy()]).then(([settings, ilm
+  ]) => {
     let rsettings = [];
 
     function addSetting (key, type, name, url, regex) {
@@ -3855,6 +3859,28 @@ app.get('/esadmin/list', [noCacheJson, recordResponseTime, checkEsAdminUser, set
       'https://www.elastic.co/guide/en/elasticsearch/reference/current/circuit-breaker.html',
       '^(|null|\\d+%)$');
 
+    function addIlm (key, current, name, type, regex) {
+      rsettings.push({ key: key, current: current, name: name, type: type, url: 'https://molo.ch/faq#ilm', regex: regex });
+    }
+
+    if (ilm[`${internals.prefix}molochsessions`]) {
+      const silm = ilm[`${internals.prefix}molochsessions`];
+      addIlm('moloch.ilm.sessions.forceTime', silm.policy.phases.warm.min_age,
+       'ILM - Sessions Force Time', 'Time String', '^\\d+[hd]$');
+      addIlm('moloch.ilm.sessions.replicas', silm.policy.phases.warm.actions.allocate.number_of_replicas,
+       'ILM - Sessions Replicas', 'Integer', '^\\d$');
+      addIlm('moloch.ilm.sessions.segments', silm.policy.phases.warm.actions.forcemerge.max_num_segments,
+       'ILM - Sessions Merge Segments ', 'Integer', '^\\d$');
+      addIlm('moloch.ilm.sessions.deleteTime', silm.policy.phases.delete.min_age,
+       'ILM - Sessions Delete Time', 'Time String', '^\\d+[hd]$');
+    }
+
+    if (ilm[`${internals.prefix}molochhistory`]) {
+      const hilm = ilm[`${internals.prefix}molochhistory`];
+      addIlm('moloch.ilm.history.deleteTime', hilm.policy.phases.delete.min_age,
+       'ILM - History Delete Time', 'Time String', '^\\d+[hd]$');
+    }
+
     return res.send(rsettings);
   });
 });
@@ -3865,6 +3891,44 @@ app.post('/esadmin/set', [noCacheJson, recordResponseTime, checkEsAdminUser, che
 
   // Convert null string to null
   if (req.body.value === 'null') { req.body.value = null; }
+
+  if (req.body.key.startsWith('moloch.ilm')) {
+    Promise.all([Db.getILMPolicy()]).then(([ilm]) => {
+      const silm = ilm[`${internals.prefix}molochsessions`];
+      const hilm = ilm[`${internals.prefix}molochhistory`];
+
+      if (silm === undefined || hilm === undefined) {
+        return res.molochError(500, 'ILM isn\'t configured');
+      }
+
+      switch (req.body.key) {
+      case 'moloch.ilm.sessions.forceTime':
+        silm.policy.phases.warm.min_age = req.body.value;
+        break;
+      case 'moloch.ilm.sessions.replicas':
+        silm.policy.phases.warm.actions.allocate.number_of_replicas = parseInt(req.body.value || 0, 10);
+        break;
+      case 'moloch.ilm.sessions.segments':
+        silm.policy.phases.warm.actions.forcemerge.max_num_segments = parseInt(req.body.value || 0, 10);
+        break;
+      case 'moloch.ilm.sessions.deleteTime':
+        silm.policy.phases.delete.min_age = req.body.value;
+        break;
+      case 'moloch.ilm.history.deleteTime':
+        hilm.policy.phases.delete.min_age = req.body.value;
+        break;
+      default:
+        return res.molochError(500, 'Unknown field');
+      }
+      if (req.body.key.startsWith('moloch.ilm.history')) {
+        Db.setILMPolicy(`${internals.prefix}molochhistory`, hilm);
+      } else {
+        Db.setILMPolicy(`${internals.prefix}molochsessions`, silm);
+      }
+      return res.send(JSON.stringify({ success: true, text: 'Set' }));
+    });
+    return;
+  }
 
   let query = { body: { persistent: {} } };
   query.body.persistent[req.body.key] = req.body.value || null;
@@ -4332,8 +4396,9 @@ app.get('/stats.json', [noCacheJson, recordResponseTime, checkPermissions(['hide
     for (let name of names) {
       name = name.trim();
       if (name !== '') {
+        if (name.endsWith('$')) { name = name.slice(0, -1); } else { name += '.*'; }
         query.query.bool.should.push({
-          wildcard: { nodeName: '*' + name + '*' }
+          regexp: { nodeName: name }
         });
       }
     }
@@ -6129,6 +6194,34 @@ function processSessionIdDisk (session, headerCb, packetCb, endCb, limit) {
           ipcap.open(file.name, file);
         } catch (err) {
           console.log("ERROR - Couldn't open file ", err);
+          if (err.code === 'EACCES') {
+            // Find all the directories to check
+            let checks = [];
+            let dir = path.resolve(file.name);
+            while ((dir = path.dirname(dir)) !== '/') {
+              checks.push(dir);
+            }
+
+            // Check them in reverse order, smallest to largest
+            let i;
+            for (i = checks.length - 1; i >= 0; i--) {
+              try {
+                fs.accessSync(checks[i], fs.constants.X_OK);
+              } catch (e) {
+                console.log(`NOTE - Directory permissions issue, possible fix "chmod a+x '${checks[i]}'"`);
+                break;
+              }
+            }
+
+            // No directory issue, check the file itself
+            if (i === -1) {
+              try {
+                fs.accessSync(file.name, fs.constants.R_OK);
+              } catch (e) {
+                console.log(`NOTE - File permissions issue, possible fix "chmod a+r '${file.name}'"`);
+              }
+            }
+          }
           return nextCb("Couldn't open file " + err);
         }
 
@@ -6485,7 +6578,7 @@ function localSessionDetail (req, res) {
  * Get SPI data for a session
  */
 app.get('/:nodeName/session/:id/detail', cspHeader, logAction(), (req, res) => {
-  Db.getWithOptions(Db.sid2Index(req.params.id), 'session', Db.sid2Id(req.params.id), {}, function (err, session) {
+  Db.getSession(req.params.id, {}, function (err, session) {
     if (err || !session.found) {
       return res.end("Couldn't look up SPI data, error for session " + safeStr(req.params.id) + ' Error: ' + err);
     }
@@ -6597,7 +6690,7 @@ app.get('/:nodeName/:id/body/:bodyType/:bodyNum/:bodyName', checkProxyRequest, f
       return res.end('Error');
     }
     res.setHeader('Content-Type', 'application/force-download');
-    res.setHeader('Content-Disposition', 'attachment; filename=' + req.params.bodyName);
+    res.setHeader('content-disposition', contentDisposition(req.params.bodyName));
     return res.end(data);
   });
 });
@@ -6662,7 +6755,7 @@ app.get('/bodyHash/:hash', logAction('bodyhash'), function (req, res) {
                 return res.end(err);
               } else if (item) {
                 noCache(req, res, 'application/force-download');
-                res.setHeader('content-disposition', 'attachment; filename=' + item.bodyName + '.pellet');
+                res.setHeader('content-disposition', contentDisposition(item.bodyName + '.pellet'));
                 return res.end(item.data);
               } else {
                 res.status(400);
@@ -6694,7 +6787,7 @@ app.get('/:nodeName/:id/bodyHash/:hash', checkProxyRequest, function (req, res) 
       return res.end(err);
     } else if (item) {
       noCache(req, res, 'application/force-download');
-      res.setHeader('content-disposition', 'attachment; filename=' + item.bodyName + '.pellet');
+      res.setHeader('content-disposition', contentDisposition(item.bodyName + '.pellet'));
       return res.end(item.data);
     } else {
       res.status(400);
@@ -6953,7 +7046,7 @@ function sessionsPcapList (req, res, list, pcapWriter, extension) {
     function () {
       // Get from remote DISK
       getViewUrl(fields.node, function (err, viewUrl, client) {
-        var buffer = Buffer.alloc(fields.pa * 20 + fields.by);
+        var buffer = Buffer.alloc(fields.totPackets * 20 + fields.totBytes);
         var bufpos = 0;
         var info = url.parse(viewUrl);
         info.path = Config.basePath(fields.node) + fields.node + '/' + extension + '/' + Db.session2Sid(item) + '.' + extension;
@@ -7504,6 +7597,11 @@ function pauseHuntJobWithError (huntId, hunt, error, node) {
 
   hunt.status = 'paused';
 
+  if (error.unrunnable) {
+    delete error.unrunnable;
+    hunt.unrunnable = true;
+  }
+
   if (!hunt.errors) {
     hunt.errors = [ error ];
   } else {
@@ -7545,7 +7643,7 @@ function updateHuntStats (hunt, huntId, session, searchedSessions, cb) {
 
       hunt.status = huntHit._source.status;
       hunt.lastUpdated = now;
-      hunt.searchedSessions = searchedSessions;
+      hunt.searchedSessions = searchedSessions || hunt.searchedSessions;
       hunt.lastPacketTime = lastPacketTime;
 
       Db.setHunt(huntId, hunt, () => {});
@@ -7581,17 +7679,128 @@ function buildHuntOptions (huntId, hunt) {
     try {
       options.regex = new RE2(hunt.search);
     } catch (e) {
-      pauseHuntJobWithError(huntId, hunt, { value: `Hunt error with regex: ${e}` });
+      pauseHuntJobWithError(huntId, hunt, {
+        value: `Fatal Error: Regex parse error. Fix this issue with your regex and create a new hunt: ${e}`,
+        unrunnable: true
+      });
     }
   }
 
   return options;
 }
 
+// if we couldn't retrieve the seession, skip it but add it to failedSessionIds
+// so that we can go back and search for it at the end of the hunt
+function continueHuntSkipSession (hunt, huntId, session, sessionId, searchedSessions, cb) {
+  if (!hunt.failedSessionIds) {
+    hunt.failedSessionIds = [ sessionId ];
+  } else {
+    // pause the hunt if there are more than 10k failed sessions
+    if (hunt.failedSessionIds.length > 10000) {
+      return pauseHuntJobWithError(huntId, hunt, {
+        value: 'Error hunting: Too many sessions are unreachable. Please contact your administrator.'
+      });
+    }
+    // make sure the session id is not already in the array
+    // if it's not the first pass and a node is still down, this could be a duplicate
+    if (hunt.failedSessionIds.indexOf(sessionId) < 0) {
+      hunt.failedSessionIds.push(sessionId);
+    }
+  }
+
+  return updateHuntStats(hunt, huntId, session, searchedSessions, cb);
+}
+
+// if there are failed sessions, go through them one by one and do a packet search
+// if there are no failed sessions left at the end then the hunt is done
+// if there are still failed sessions, but some sessions were searched during the last pass, try again
+// if there are still failed sessions, but no new sessions coudl be searched, pause the job with an error
+function huntFailedSessions (hunt, huntId, options, searchedSessions, user) {
+  if (!hunt.failedSessionIds && !hunt.failedSessionIds.length) { return; }
+
+  let changesSearchingFailedSessions = false;
+
+  options.searchingFailedSessions = true;
+  // copy the failed session ids so we can remove them from the hunt
+  // but still loop through them iteratively
+  let failedSessions = JSON.parse(JSON.stringify(hunt.failedSessionIds));
+  // we don't need to search the db for session, we just need to search each session in failedSessionIds
+  async.forEachLimit(failedSessions, 3, function (sessionId, cb) {
+    Db.getSession(sessionId, { _source: 'node,huntName,huntId,lastPacket,field' }, (err, session) => {
+      if (err) {
+        return continueHuntSkipSession(hunt, huntId, session, sessionId, searchedSessions, cb);
+      }
+
+      session = session._source;
+
+      makeRequest(session.node, `${session.node}/hunt/${huntId}/remote/${sessionId}`, user, (err, response) => {
+        if (err) {
+          return continueHuntSkipSession(hunt, huntId, session, sessionId, searchedSessions, cb);
+        }
+
+        let json = JSON.parse(response);
+
+        if (json.error) {
+          console.log(`Error hunting on remote viewer: ${json.error} - ${path}`);
+          return continueHuntSkipSession(hunt, huntId, session, sessionId, searchedSessions, cb);
+        }
+
+        // remove from failedSessionIds if it was found
+        hunt.failedSessionIds.splice(hunt.failedSessionIds.indexOf(sessionId), 1);
+        // there were changes to this hunt; we're making progress
+        changesSearchingFailedSessions = true;
+
+        if (json.matched) { hunt.matchedSessions++; }
+        return updateHuntStats(hunt, huntId, session, searchedSessions, cb);
+      });
+    });
+  }, function (err) { // done running a pass of the failed sessions
+    function continueProcess () {
+      Db.setHunt(huntId, hunt, (err, info) => {
+        internals.runningHuntJob = undefined;
+        processHuntJobs(); // Start new hunt
+      });
+    }
+
+    if (hunt.failedSessionIds && hunt.failedSessionIds.length === 0) {
+      options.searchingFailedSessions = false; // no longer searching failed sessions
+      // we had failed sessions but we're done searching through them
+      // so we're completely done with this hunt (inital search and failed sessions)
+      hunt.status = 'finished';
+
+      if (hunt.notifier) {
+        let message = `*${hunt.name}* hunt job finished:\n*${hunt.matchedSessions}* matched sessions out of *${hunt.searchedSessions}* searched sessions`;
+        issueAlert(hunt.notifier, message, continueProcess);
+      } else {
+        return continueProcess();
+      }
+    } else if (hunt.failedSessionIds && hunt.failedSessionIds.length > 0 && changesSearchingFailedSessions) {
+      // there are still failed sessions, but there were also changes,
+      // so keep going
+      // uninitialize hunts so that the running job with failed sessions will kick off again
+      internals.proccessHuntJobsInitialized = false;
+      return continueProcess();
+    } else if (!changesSearchingFailedSessions) {
+      options.searchingFailedSessions = false; // no longer searching failed sessions
+      // there were no changes, we're still struggling to connect to one or
+      // more renote nodes, so error out
+      return pauseHuntJobWithError(huntId, hunt, {
+        value: 'Error hunting previously unreachable sessions. There is likely a node down. Please contact your administrator.'
+      });
+    }
+  });
+}
+
 // Actually do the search against ES and process the results.
 function runHuntJob (huntId, hunt, query, user) {
   let options = buildHuntOptions(huntId, hunt);
   let searchedSessions;
+
+  // look for failed sessions if we're done searching sessions normally
+  if (!options.searchingFailedSessions && hunt.searchedSessions === hunt.totalSessions && hunt.failedSessionIds && hunt.failedSessionIds.length) {
+    options.searchingFailedSessions = true;
+    return huntFailedSessions(hunt, huntId, options, searchedSessions, user);
+  }
 
   Db.search('sessions2-*', 'session', query, { scroll: internals.esScrollTimeout }, function getMoreUntilDone (err, result) {
     if (err || result.error) {
@@ -7600,12 +7809,11 @@ function runHuntJob (huntId, hunt, query, user) {
     }
 
     let hits = result.hits.hits;
-
     if (searchedSessions === undefined) {
       searchedSessions = hunt.searchedSessions || 0;
       // if the session query results length is not equal to the total sessions that the hunt
       // job is searching, update the hunt total sessions so that the percent works correctly
-      if (hunt.totalSessions !== (result.hits.total + searchedSessions)) {
+      if (!options.searchingFailedSessions && hunt.totalSessions !== (result.hits.total + searchedSessions)) {
         hunt.totalSessions = result.hits.total + searchedSessions;
       }
     }
@@ -7616,7 +7824,7 @@ function runHuntJob (huntId, hunt, query, user) {
       let sessionId = Db.session2Sid(hit);
       let node = session.node;
 
-      // There is no files, this is a fake session, don't hunt it
+      // There are no files, this is a fake session, don't hunt it
       if (session.fileId === undefined || session.fileId.length === 0) {
         return updateHuntStats(hunt, huntId, session, searchedSessions, cb);
       }
@@ -7640,7 +7848,7 @@ function runHuntJob (huntId, hunt, query, user) {
 
         makeRequest(node, path, user, (err, response) => {
           if (err) {
-            return pauseHuntJobWithError(huntId, hunt, { value: `Error hunting on remote viewer: ${err}` }, node);
+            return continueHuntSkipSession(hunt, huntId, session, sessionId, searchedSessions, cb);
           }
           let json = JSON.parse(response);
           if (json.error) {
@@ -7668,16 +7876,24 @@ function runHuntJob (huntId, hunt, query, user) {
 
       Db.clearScroll({ body: { scroll_id: result._scroll_id } });
 
-      // We are totally done with this hunt
-      hunt.status = 'finished';
       hunt.searchedSessions = hunt.totalSessions;
 
       function continueProcess () {
         Db.setHunt(huntId, hunt, (err, info) => {
           internals.runningHuntJob = undefined;
-          processHuntJobs(); // Start new hunt
+          processHuntJobs(); // start new hunt or go back over failedSessionIds
         });
       }
+
+      // the hunt is not actually finished, need to go through the failed session ids
+      if (hunt.failedSessionIds && hunt.failedSessionIds.length) {
+        // uninitialize hunts so that the running job with failed sessions will kick off again
+        internals.proccessHuntJobsInitialized = false;
+        return continueProcess();
+      }
+
+      // We are totally done with this hunt
+      hunt.status = 'finished';
 
       if (hunt.notifier) {
         let message = `*${hunt.name}* hunt job finished:\n*${hunt.matchedSessions}* matched sessions out of *${hunt.searchedSessions}* searched sessions`;
@@ -7738,7 +7954,8 @@ function processHuntJob (huntId, hunt) {
       buildSessionQuery(fakeReq, (err, query, indices) => {
         if (err) {
           pauseHuntJobWithError(huntId, hunt, {
-            value: 'Fatal Error: Session query expression parse error. Fix your search expression and create a new hunt.'
+            value: 'Fatal Error: Session query expression parse error. Fix your search expression and create a new hunt.',
+            unrunnable: true
           });
           return;
         }
@@ -7792,11 +8009,12 @@ function processHuntJobs (cb) {
         var hunt = hit._source;
         let id = hit._id;
 
-        if (hunt.status === 'running') { // there is a job already running
+         // there is a job already running
+        if (hunt.status === 'running') {
           internals.runningHuntJob = hunt;
           if (!internals.proccessHuntJobsInitialized) {
             internals.proccessHuntJobsInitialized = true;
-            // restart the abandoned hunt
+            // restart the abandoned or incomplete hunt
             processHuntJob(id, hunt);
           }
           return (cb ? cb() : null);
@@ -7819,7 +8037,7 @@ function processHuntJobs (cb) {
 }
 
 function updateHuntStatus (req, res, status, successText, errorText) {
-  Db.get('hunts', 'hunt', req.params.id, (err, hit) => {
+  Db.getHunt(req.params.id, (err, hit) => {
     if (err) {
       console.log(errorText, err, hit);
       return res.molochError(500, errorText);
@@ -7848,6 +8066,46 @@ function updateHuntStatus (req, res, status, successText, errorText) {
       }
       res.send(JSON.stringify({ success: true, text: successText }));
       processHuntJobs();
+    });
+  });
+}
+
+function validateUserIds (userIdList) {
+  return new Promise((resolve, reject) => {
+    const query = {
+      _source: ['userId'],
+      from: 0,
+      size: 10000,
+      query: { // exclude the shared user from results
+        bool: { must_not: { term: { userId: '_moloch_shared' } } }
+      }
+    };
+
+    // don't even bother searching for users if in anonymous mode
+    if (!!app.locals.noPasswordSecret && !Config.get('regressionTests', false)) {
+      resolve({ validUsers: [], invalidUsers: [] });
+    }
+
+    Db.searchUsers(query, (error, users) => {
+      if (error) {
+        reject('Unable to validate userIds');
+      }
+
+      let usersList = [];
+      usersList = users.hits.hits.map((user) => {
+        return user._source.userId;
+      });
+
+      let validUsers = [];
+      let invalidUsers = [];
+      for (let user of userIdList) {
+        usersList.indexOf(user) > -1 ? validUsers.push(user) : invalidUsers.push(user);
+      }
+
+      resolve({
+        validUsers: validUsers,
+        invalidUsers: invalidUsers
+      });
     });
   });
 }
@@ -7900,13 +8158,46 @@ app.post('/hunt', [noCacheJson, logAction('hunt'), checkCookieToken, checkPermis
     view: req.body.hunt.query.view
   };
 
-  Db.createHunt(hunt, function (err, result) {
-    if (err) { console.log('create hunt error', err, result); }
-    hunt.id = result._id;
-    processHuntJobs(() => {
-      return res.send(JSON.stringify({ success: true, hunt: hunt }));
+  function doneCb (hunt, invalidUsers) {
+    Db.createHunt(hunt, function (err, result) {
+      if (err) {
+        console.log('create hunt error', err, result);
+        return res.molochError(500, 'Error creating hunt - ' + err);
+      }
+      hunt.id = result._id;
+      processHuntJobs(() => {
+        let response = {
+          success: true,
+          hunt: hunt
+        };
+
+        if (invalidUsers) {
+          response.invalidUsers = invalidUsers;
+        }
+
+        return res.send(JSON.stringify(response));
+      });
     });
-  });
+  }
+
+  if (!req.body.hunt.users || !req.body.hunt.users.length) {
+    return doneCb(hunt);
+  }
+
+  let reqUsers = commaStringToArray(req.body.hunt.users);
+
+  validateUserIds(reqUsers)
+    .then((response) => {
+      hunt.users = response.validUsers;
+
+      // dedupe the array of users
+      hunt.users = [...new Set(hunt.users)];
+
+      return doneCb(hunt, response.invalidUsers);
+    })
+    .catch((error) => {
+      res.molochError(500, error);
+    });
 });
 
 app.get('/hunt/list', [noCacheJson, recordResponseTime, checkPermissions(['packetSearch']), setCookie], (req, res) => {
@@ -7931,7 +8222,7 @@ app.get('/hunt/list', [noCacheJson, recordResponseTime, checkPermissions(['packe
         }
       });
     }
-  } else { // get queued, paused, and running jobs
+  } else { // get queued, paused, running jobs
     query.from = 0;
     query.size = 1000;
     query.query.bool.must.push({ terms: { status: ['queued', 'paused', 'running'] } });
@@ -7960,8 +8251,12 @@ app.get('/hunt/list', [noCacheJson, recordResponseTime, checkPermissions(['packe
           continue;
         }
 
-        // Since hunt isn't cached we can just modify
-        if (!req.user.createEnabled && req.user.userId !== hunt.userId) {
+        hunt.users = hunt.users || [];
+
+        // clear out secret fields for users who don't have access to that hunt
+        // if the user is not an admin and didn't create the hunt and isn't part of the user's list
+        if (!req.user.createEnabled && req.user.userId !== hunt.userId && hunt.users.indexOf(req.user.userId) < 0) {
+          // since hunt isn't cached we can just modify
           hunt.search = '';
           hunt.searchType = '';
           hunt.id = '';
@@ -8006,6 +8301,87 @@ app.put('/hunt/:id/pause', [noCacheJson, logAction('hunt/:id/pause'), checkCooki
 app.put('/hunt/:id/play', [noCacheJson, logAction('hunt/:id/play'), checkCookieToken, checkPermissions(['packetSearch']), checkHuntAccess], (req, res) => {
   if (Config.get('multiES', false)) { return res.molochError(401, 'Not supported in multies'); }
   updateHuntStatus(req, res, 'queued', 'Queued hunt item successfully', 'Error starting hunt job');
+});
+
+app.delete('/hunt/:id/users/:user', [noCacheJson, logAction('hunt/:id/users/:user'), checkCookieToken, checkPermissions(['packetSearch']), checkHuntAccess], (req, res) => {
+  if (Config.get('multiES', false)) { return res.molochError(401, 'Not supported in multies'); }
+
+  Db.getHunt(req.params.id, (err, hit) => {
+    if (err) {
+      console.log('Unable to fetch hunt to remove user', err, hit);
+      return res.molochError(500, 'Unable to fetch hunt to remove user');
+    }
+
+    let hunt = hit._source;
+
+    if (!hunt.users || !hunt.users.length) {
+      return res.molochError(404, 'There are no users that have access to view this hunt');
+    }
+
+    let userIdx = hunt.users.indexOf(req.params.user);
+
+    if (userIdx < 0) { // user doesn't have access to this hunt
+      return res.molochError(404, 'That user does not have access to this hunt');
+    }
+
+    // remove the user from the list
+    hunt.users.splice(userIdx, 1);
+
+    Db.setHunt(req.params.id, hunt, (err, info) => {
+      if (err) {
+        console.log('Unable to remove user', err, info);
+        return res.molochError(500, 'Unable to remove user');
+      }
+      res.send(JSON.stringify({ success: true, users: hunt.users }));
+    });
+  });
+});
+
+app.post('/hunt/:id/users', [noCacheJson, logAction('hunt/:id/users/:user'), checkCookieToken, checkPermissions(['packetSearch']), checkHuntAccess], (req, res) => {
+  if (Config.get('multiES', false)) { return res.molochError(401, 'Not supported in multies'); }
+
+  if (!req.body.users) { return res.molochError(403, 'You must provide users in a comma separated string'); }
+
+  Db.getHunt(req.params.id, (err, hit) => {
+    if (err) {
+      console.log('Unable to fetch hunt to add user(s)', err, hit);
+      return res.molochError(500, 'Unable to fetch hunt to add user(s)');
+    }
+
+    let hunt = hit._source;
+    let reqUsers = commaStringToArray(req.body.users);
+
+    validateUserIds(reqUsers)
+      .then((response) => {
+        if (!response.validUsers.length) {
+          return res.molochError(404, 'Unable to validate user IDs provided');
+        }
+
+        if (!hunt.users) {
+          hunt.users = response.validUsers;
+        } else {
+          hunt.users = hunt.users.concat(response.validUsers);
+        }
+
+        // dedupe the array of users
+        hunt.users = [...new Set(hunt.users)];
+
+        Db.setHunt(req.params.id, hunt, (err, info) => {
+          if (err) {
+            console.log('Unable to add user(s)', err, info);
+            return res.molochError(500, 'Unable to add user(s)');
+          }
+          res.send(JSON.stringify({
+            success: true,
+            users: hunt.users,
+            invalidUsers: response.invalidUsers
+          }));
+        });
+      })
+      .catch((error) => {
+        res.molochError(500, error);
+      });
+  });
 });
 
 app.get('/:nodeName/hunt/:huntId/remote/:sessionId', [noCacheJson], function (req, res) {
@@ -8148,9 +8524,9 @@ app.get('/lookups', [noCacheJson, getSettingUserCache, recordResponseTime], func
   });
 });
 
-function createLookupsArray (lookupsString) {
+function commaStringToArray (commaString) {
   // split string on commas and newlines
-  let values = lookupsString.split(/[,\n]+/g);
+  let values = commaString.split(/[,\n]+/g);
 
   // remove any empty values
   values = values.filter(function (val) {
@@ -8199,7 +8575,7 @@ app.post('/lookups', [noCacheJson, getSettingUserDb, logAction('lookups'), check
         variable.userId = user.userId;
 
         // comma/newline separated value -> array of values
-        const values = createLookupsArray(variable.value);
+        const values = commaStringToArray(variable.value);
         variable[variable.type] = values;
 
         const type = variable.type;
@@ -8254,7 +8630,7 @@ app.put('/lookups/:id', [noCacheJson, getSettingUserDb, logAction('lookups/:id')
     }
 
     // comma/newline separated value -> array of values
-    const values = createLookupsArray(sentVar.value);
+    const values = commaStringToArray(sentVar.value);
     sentVar[sentVar.type] = values;
     sentVar.userId = fetchedVar._source.userId;
 
@@ -8912,7 +9288,7 @@ app.post('/upload', [checkCookieToken, multer({ dest: '/tmp', limits: internals.
       res.status(500);
       res.write('<b>Upload command failed:</b><br>');
     }
-    res.write(cmd);
+    res.write(safeStr(cmd));
     res.write('<br>');
     res.write('<pre>');
     res.write(stdout);
@@ -9071,7 +9447,8 @@ app.use(cspHeader, setCookie, (req, res) => {
     themeUrl: theme === 'custom-theme' ? 'user.css' : '',
     huntWarn: Config.get('huntWarn', 100000),
     huntLimit: limit,
-    serverNonce: res.locals.nonce
+    serverNonce: res.locals.nonce,
+    anonymousMode: !!app.locals.noPasswordSecret && !Config.get('regressionTests', false)
   };
 
   // Create a fresh Vue app instance
@@ -9444,5 +9821,6 @@ Db.initialize({ host: internals.elasticBase,
   ca: Config.getCaTrustCerts(Config.nodeName()),
   requestTimeout: Config.get('elasticsearchTimeout', 300),
   esProfile: Config.esProfile,
-  debug: Config.debug
+  debug: Config.debug,
+  getSessionBySearch: Config.get('getSessionBySearch', '')
 }, main);

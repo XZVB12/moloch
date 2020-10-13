@@ -622,4 +622,22 @@ dl.dl-horizontal.dl-horizontal-wide dd {
 table.table {
   color: var(--color-foreground, #555);
 }
+
+/* remove lastpass icons from all inputs
+   could also use 'data-lpignore="true"' on each individual input
+   that we want to exclude */
+div[id^=__lpform_] {
+  display: none;
+}
+input {
+  background-image: none !important;
+  background-attachment: none !important;
+}
+
+/* badge remove button */
+.badge > button.close {
+  line-height: 0.4;
+  font-size: 1.2rem;
+  margin-left: 0.3rem;
+}
 </style>

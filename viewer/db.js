@@ -21,6 +21,7 @@
 var ESC = require('elasticsearch');
 var os = require('os');
 var fs = require('fs');
+const { Client } = require('@elastic/elasticsearch');
 
 var internals = { fileId2File: {},
   fileName2File: {},
@@ -40,6 +41,8 @@ var internals = { fileId2File: {},
 exports.initialize = function (info, cb) {
   internals.multiES = info.multiES === 'true' || info.multiES === true || false;
   internals.debug = info.debug || 0;
+  internals.getSessionBySearch = info.getSessionBySearch || false;
+
   delete info.multiES;
   delete info.debug;
 
@@ -92,6 +95,15 @@ exports.initialize = function (info, cb) {
       throw new Error('Exiting');
     }
 
+    if (data.version.number.match(/^(7)/)) {
+      internals.client7 = new Client({
+        node: internals.info.host,
+        maxRetries: 2,
+        requestTimeout: (parseInt(info.requestTimeout, 10) + 30) * 1000 || 330000,
+        ssl: esSSLOptions
+      });
+    }
+
     if (info.usersHost) {
       internals.usersElasticSearchClient = new ESC.Client({
         host: internals.info.usersHost,
@@ -114,7 +126,7 @@ exports.initialize = function (info, cb) {
     internals.prefix = 'MULTIPREFIX_';
   }
 
-  // Update aliases cache so -shrink works
+  // Update aliases cache so -shrink/-reindex works
   if (internals.nodeName !== undefined) {
     exports.getAliasesCache('sessions2-*', () => {});
     setInterval(() => { exports.getAliasesCache('sessions2-*', () => {}); }, 2 * 60 * 1000);
@@ -149,6 +161,11 @@ function fixIndex (index) {
     index += '-shrink';
   }
 
+  // If the index doesn't exist but the reindex version does exist, add -reindex
+  if (internals.aliasesCache && !internals.aliasesCache[index] && internals.aliasesCache[index + '-reindex']) {
+    index += '-reindex';
+  }
+
   return index;
 }
 
@@ -170,36 +187,52 @@ exports.getWithOptions = function (index, type, id, options, cb) {
 
 // Get a session from ES and decode packetPos if requested
 exports.getSession = function (id, options, cb) {
-    exports.getWithOptions(exports.sid2Index(id), 'session', exports.sid2Id(id), options, (err, session) => {
+  function fixPacketPos (session, fields) {
+    if (!fields.packetPos || fields.packetPos.length === 0) {
+      return cb(null, session);
+    }
+    exports.fileIdToFile(fields.node, -1 * fields.packetPos[0], (fileInfo) => {
+      // Neg numbers aren't encoded, if pos is 0 same gap as last gap, otherwise last + pos
+      if (fileInfo.packetPosEncoding === 'gap0') {
+        let last = 0;
+        let lastgap = 0;
+        for (let i = 0, ilen = fields.packetPos.length; i < ilen; i++) {
+          if (fields.packetPos[i] < 0) {
+            last = 0;
+          } else {
+            if (fields.packetPos[i] === 0) {
+              fields.packetPos[i] = last + lastgap;
+            } else {
+              lastgap = fields.packetPos[i];
+              fields.packetPos[i] += last;
+            }
+            last = fields.packetPos[i];
+          }
+        }
+      }
+      return cb(null, session);
+    });
+  }
+
+  if (internals.getSessionBySearch) {
+    exports.search(exports.sid2Index(id), '_doc', { query: { ids: { values: [exports.sid2Id(id)] } } }, options, (err, results) => {
+      if (err) { return cb(err); }
+      if (!results.hits || !results.hits.hits || results.hits.hits.length === 0) { return cb('Not found'); }
+      let session = results.hits.hits[0];
+      session.found = true;
+      if (options && options._source && !options._source.includes('packetPos')) {
+        return cb(null, session);
+      }
+      return fixPacketPos(session, session._source || session.fields);
+    });
+  } else {
+    exports.getWithOptions(exports.sid2Index(id), '_doc', exports.sid2Id(id), options, (err, session) => {
       if (err || (options && options._source && !options._source.includes('packetPos'))) {
         return cb(err, session);
       }
-      let fields = session._source || session.fields;
-      if (!fields.packetPos || fields.packetPos.length === 0) {
-        return cb(err, session);
-      }
-      exports.fileIdToFile(fields.node, -1 * fields.packetPos[0], (fileInfo) => {
-        // Neg numbers aren't encoded, if pos is 0 same gap as last gap, otherwise last + pos
-        if (fileInfo.packetPosEncoding === 'gap0') {
-          let last = 0;
-          let lastgap = 0;
-          for (let i = 0, ilen = fields.packetPos.length; i < ilen; i++) {
-            if (fields.packetPos[i] < 0) {
-              last = 0;
-            } else {
-              if (fields.packetPos[i] === 0) {
-                fields.packetPos[i] = last + lastgap;
-              } else {
-                lastgap = fields.packetPos[i];
-                fields.packetPos[i] += last;
-              }
-              last = fields.packetPos[i];
-            }
-          }
-        }
-        return cb(err, session);
-      });
+      return fixPacketPos(session, session._source || session.fields);
     });
+  }
 };
 
 exports.index = function (index, type, id, document, cb) {
@@ -792,6 +825,9 @@ exports.deleteHuntItem = function (id, cb) {
 exports.setHunt = function (id, doc, cb) {
   return internals.elasticSearchClient.index({ index: fixIndex('hunts'), type: '_doc', body: doc, id: id, refresh: true, timeout: '10m' }, cb);
 };
+exports.getHunt = function (id, cb) {
+  return internals.usersElasticSearchClient.get({ index: fixIndex('hunts'), type: '_doc', id: id }, cb);
+};
 
 exports.searchLookups = function (query, cb) {
   return internals.elasticSearchClient.search({ index: fixIndex('lookups'), body: query, rest_total_hits_as_int: true }, cb);
@@ -1246,6 +1282,9 @@ exports.getIndices = function (startTime, stopTime, bounding, rotateIndex, cb) {
       if (index.endsWith('-shrink')) {
         index = index.substring(0, index.length - 7);
       }
+      if (index.endsWith('-reindex')) {
+        index = index.substring(0, index.length - 8);
+      }
       index = index.substring(internals.prefix.length + 10);
       let year; let month; let day = 0; let hour = 0; let length;
 
@@ -1308,5 +1347,43 @@ exports.getMinValue = function (index, field, cb) {
   return internals.elasticSearchClient.search(params, (err, data) => {
     if (err) { return cb(err, 0); }
     return cb(null, data.aggregations.min.value);
+  });
+};
+
+exports.getILMPolicy = function () {
+  if (!internals.client7) {
+    return new Promise((resolve, reject) => {
+      console.log('no client 7');
+      resolve({});
+    });
+  }
+  return new Promise((resolve, reject) => {
+    internals.client7.ilm.getLifecycle({ policy: `${internals.prefix}molochsessions,${internals.prefix}molochhistory` }, (err, data) => {
+      if (err) {
+        resolve({});
+      } else {
+        resolve(data.body);
+      }
+    });
+  });
+};
+
+exports.setILMPolicy = function (name, policy) {
+  console.log('name', name, 'policy', policy);
+  if (!internals.client7) {
+    return new Promise((resolve, reject) => {
+      console.log('no client 7');
+      resolve({});
+    });
+  }
+  return new Promise((resolve, reject) => {
+    internals.client7.ilm.putLifecycle({ policy: name, body: { policy: policy.policy } }, (err, data) => {
+      if (err) {
+        console.log('ERROR', err, 'data', data);
+        reject(err);
+      } else {
+        resolve(data.body);
+      }
+    });
   });
 };

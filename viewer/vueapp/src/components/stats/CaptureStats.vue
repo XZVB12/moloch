@@ -21,7 +21,7 @@
         :records-total="recordsTotal"
         :records-filtered="recordsFiltered"
         v-on:changePaging="changePaging"
-        length-default=100>
+        length-default=200>
       </moloch-paging>
 
       <moloch-table
@@ -91,7 +91,7 @@ export default {
       showNodeStats: true,
       expandedNodeStats: {},
       query: {
-        length: parseInt(this.$route.query.length) || 100,
+        length: parseInt(this.$route.query.length) || 200,
         start: 0,
         filter: this.searchTerm || undefined,
         sortField: 'nodeName',
@@ -114,7 +114,7 @@ export default {
         { id: 'deltaSessions', name: 'Sessions/s', sort: 'deltaSessions', width: 100, default: true, doStats: true, dataFunction: (item) => { return this.$options.filters.roundCommaString(item.deltaSessions); } },
         { id: 'deltaDropped', name: 'Packet Drops/s', sort: 'deltaDropped', width: 130, default: true, doStats: true, dataFunction: (item) => { return this.$options.filters.roundCommaString(item.deltaDropped); } },
         // all the rest of the available stats
-        { id: 'deltaBitsPerSec', name: 'Bits/Sec', sort: 'deltaBitsPerSec', width: 100, doStats: true, dataFunction: (item) => { return this.$options.filters.roundCommaString(item.deltaBitsPerSec); } },
+        { id: 'deltaBitsPerSec', name: 'Bits/Sec', sort: 'deltaBitsPerSec', width: 100, doStats: true, dataFunction: (item) => { return this.$options.filters.humanReadableBits(item.deltaBitsPerSec); } },
         { id: 'deltaWrittenBytesPerSec', name: 'Written Bytes/s', sort: 'deltaWrittenBytesPerSec', width: 100, doStats: true, dataFunction: (item) => { return this.$options.filters.humanReadableBytes(item.deltaWrittenBytesPerSec); } },
         { id: 'deltaUnwrittenBytesPerSec', name: 'Unwritten Bytes/s', sort: 'deltaUnwrittenBytesPerSec', width: 100, doStats: true, dataFunction: (item) => { return this.$options.filters.humanReadableBytes(item.deltaUnwrittenBytesPerSec); } },
         { id: 'tcpSessions', name: 'Active TCP Sessions', sort: 'tcpSessions', width: 100, doStats: true, dataFunction: (item) => { return this.$options.filters.roundCommaString(item.tcpSessions); } },
