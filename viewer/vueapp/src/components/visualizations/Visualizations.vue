@@ -252,6 +252,12 @@ let landColorLight;
 let timeout;
 let basePath;
 
+// bar width vars
+let barWidth;
+let hoverBarWidth;
+let barWidthInUnits;
+let barWidthInPixels;
+
 export default {
   name: 'MolochVisualizations',
   props: {
@@ -269,6 +275,15 @@ export default {
     timelineDataFilters: {
       type: Array,
       required: true
+    },
+    capStartTimes: {
+      type: Array,
+      default: () => {
+        return [{
+          nodeName: 'none',
+          startTime: 1
+        }];
+      }
     }
   },
   data: function () {
@@ -373,6 +388,7 @@ export default {
       if (newVal && oldVal) {
         this.setupGraphData(); // setup this.graph and this.graphOptions
         this.plot = $.plot(this.plotArea, this.graph, this.graphOptions);
+        this.calculateHoverBarWidth();
       }
     },
     mapData: function (newVal, oldVal) {
@@ -566,6 +582,8 @@ export default {
       this.plotArea = $('#plotArea' + this.id);
       this.plot = $.plot(this.plotArea, this.graph, this.graphOptions);
 
+      this.calculateHoverBarWidth();
+
       setTimeout(() => { // wait for plot to render
         // account for size of the y axis labels
         const yAxisLabelSize = $(this.plotArea.find('.yAxis > .tickLabel')).width() * 2;
@@ -628,6 +646,33 @@ export default {
         } else {
           $(document.body).find('#tooltip').remove();
           previousPoint = null;
+
+          // show capture process start time tooltip
+          // it is only 1px wide, but the hover displays if a user hovers over the
+          // surrounding line by half a bar width on either side (so it should
+          // still allow a user to see tooltips for data)
+          let capNode, capStartTime;
+          let isInCapTimeRange = false;
+          for (let cap of this.capStartTimes) {
+            if (cap.startTime) {
+              if (pos.x1 >= cap.startTime - hoverBarWidth && pos.x1 < cap.startTime + hoverBarWidth) {
+                capNode = cap.nodeName;
+                capStartTime = cap.startTime;
+                isInCapTimeRange = true;
+                break;
+              }
+            }
+          }
+          if (isInCapTimeRange) {
+            let tooltipHTML = `<div id="tooltip" class="graph-tooltip">
+                                Capture node ${capNode} started at ${this.$options.filters.timezoneDateString(capStartTime, this.timezone || 'local', false)}
+                              </div>`;
+
+            $(tooltipHTML).css({
+              top: pos.pageY - 30,
+              left: pos.pageX - 8
+            }).appendTo(document.body);
+          }
         }
       });
     },
@@ -657,12 +702,12 @@ export default {
         this.graph[i].bars = { show: showBars };
       }
 
+      barWidth = (this.graphData.interval * 1000) / 1.7;
+
       this.graphOptions = { // flot graph options
         series: {
           stack: true,
-          bars: {
-            barWidth: (this.graphData.interval * 1000) / 1.7
-          },
+          bars: { barWidth: barWidth },
           lines: {
             fill: true
           }
@@ -700,7 +745,8 @@ export default {
           borderWidth: 0,
           color: foregroundColor,
           hoverable: true,
-          clickable: true
+          clickable: true,
+          markings: []
         },
         zoom: {
           interactive: false,
@@ -713,6 +759,16 @@ export default {
           frameRate: 20
         }
       };
+
+      for (let capture of this.capStartTimes) {
+        this.graphOptions.grid.markings.push({
+          color: foregroundColor || '#666',
+          xaxis: {
+            from: capture.startTime,
+            to: capture.startTime
+          }
+        });
+      }
     },
     /* helper MAP functions */
     onMapResize: function () {
@@ -838,6 +894,25 @@ export default {
       });
 
       this.legend = this.legend.slice(0, 10); // get top 10
+    },
+    calculateHoverBarWidth: function () {
+      // calculate the bar with units for node start hover behavior
+      barWidthInUnits = this.plot.getOptions().series.bars.barWidth;
+      barWidthInPixels = barWidthInUnits * this.plot.getXAxes()[0].scale;
+      hoverBarWidth = barWidth / 2;
+      // make sure the barwidth isn't too small to activate hover on node start
+      // or too large to overflow bar width
+      if (barWidthInPixels <= 0.2) {
+        hoverBarWidth = barWidth * 10;
+      } else if (barWidthInPixels <= 1) {
+        hoverBarWidth = barWidth * 2;
+      } else if (barWidthInPixels <= 2) {
+        hoverBarWidth = barWidth;
+      } else if (barWidthInPixels >= 50) {
+        hoverBarWidth = barWidth / 10;
+      } else if (barWidthInPixels >= 200) {
+        hoverBarWidth = barWidth / 100;
+      }
     }
   },
   beforeDestroy: function () {

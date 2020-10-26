@@ -435,7 +435,7 @@ ThreatStreamSource.prototype.openDbCopy = function () {
         realDb = null;
 
         var tempDb = new sqlite3.Database(dbFile + '.temp');
-        tempDb.run('CREATE INDEX md5_index ON ts (md5)', (err) => {
+        tempDb.run('CREATE INDEX IF NOT EXISTS md5_index ON ts (md5)', (err) => {
           tempDb.close();
           if (this.db) {
             this.db.close();
@@ -487,7 +487,7 @@ ThreatStreamSource.prototype.openDb = function () {
       }, 30 * 1000); // Try to lock in 30 seconds
     }
 
-    realDb.run('CREATE INDEX md5_index ON ts (md5)', (err) => {
+    realDb.run('CREATE INDEX IF NOT EXISTS md5_index ON ts (md5)', (err) => {
       realDb.run('END', (err) => {
         if (this.db) {
           this.db.close();
@@ -497,15 +497,15 @@ ThreatStreamSource.prototype.openDb = function () {
     });
   };
 
-  // If the last copy time doesn't match start the copy process.
+  // If the last create time doesn't match reopen and make sure index is there
   // This will also run on startup.
-  if (this.mtime !== dbStat.mtime.getTime()) {
-    this.mtime = dbStat.mtime.getTime();
+  if (this.ctime !== dbStat.ctime.getTime()) {
+    this.ctime = dbStat.ctime.getTime();
     realDb = new sqlite3.Database(dbFile);
     realDb.run('BEGIN IMMEDIATE', beginImmediate);
   } else if (!this.db) {
     // Open the DB if not already opened.
-    this.db = new sqlite3.Database(dbFile + '.moloch', sqlite3.OPEN_READONLY);
+    this.db = new sqlite3.Database(dbFile, sqlite3.OPEN_READONLY);
   }
 };
 // ----------------------------------------------------------------------------
