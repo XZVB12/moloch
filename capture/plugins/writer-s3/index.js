@@ -70,6 +70,10 @@ function makeS3 (node, region) {
     s3Params.s3ForcePathStyle = true;
   }
 
+  if (Config.getBoolFull(node, 's3UseHttp', false) === true) {
+    s3Params.sslEnabled = false;
+  }
+
   // Lets hope that we can find a credential provider elsewhere
   var rv = S3s[region + key] = new AWS.S3(s3Params);
   return rv;
@@ -131,7 +135,7 @@ function processSessionIdS3 (session, headerCb, packetCb, endCb, limit) {
             if (!decompressed[sp.rangeStart]) {
               var offset = sp.rangeStart - data.rangeStart;
               decompressed[sp.rangeStart] = zlib.inflateRawSync(s3data.Body.subarray(offset, offset + COMPRESSED_BLOCK_SIZE),
-                  { finishFlush: zlib.constants.Z_SYNC_FLUSH });
+                { finishFlush: zlib.constants.Z_SYNC_FLUSH });
             }
           }
           async.each(data.subPackets, function (sp, nextCb) {

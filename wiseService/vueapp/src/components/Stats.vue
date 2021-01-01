@@ -1,6 +1,6 @@
 <template>
   <div class="container-fluid">
-    <Error :initialError="error" v-on:clear-initialError="error = ''"/>
+    <Alert :initialAlert="alertMessage" variant="alert-danger" v-on:clear-initialAlert="alertMessage = ''"/>
 
     <div>
       <b-tabs content-class="mt-3">
@@ -23,16 +23,16 @@
 
 <script>
 import WiseService from './wise.service';
-import Error from './Error';
+import Alert from './Alert';
 
 export default {
   name: 'Stats',
   components: {
-    Error
+    Alert
   },
   data: function () {
     return {
-      error: '',
+      alertMessage: '',
       sourceStats: [],
       typeStats: [],
       sourceTableFields: [],
@@ -46,22 +46,34 @@ export default {
     loadResourceStats: function () {
       WiseService.getResourceStats()
         .then((data) => {
-          this.error = '';
+          this.alertMessage = '';
           if (data && data.sources && data.sources.length > 0) {
             this.sourceStats = data.sources;
             Object.keys(this.sourceStats[0]).forEach(key => {
-              this.sourceTableFields.push({ key: key, sortable: true });
+              const obj = { key: key, sortable: true };
+              if (key !== 'source') {
+                obj.formatter = (value, key, item) => value.toString().replace(/\B(?<!\.\d*)(?=(\d{3})+(?!\d))/g, ',');
+                obj.tdClass = 'text-right';
+                obj.thClass = 'text-right';
+              }
+              this.sourceTableFields.push(obj);
             });
           }
           if (data && data.types && data.types.length > 0) {
             this.typeStats = data.types;
             Object.keys(this.typeStats[0]).forEach(key => {
-              this.typeTableFields.push({ key: key, sortable: true });
+              const obj = { key: key, sortable: true };
+              if (key !== 'type') {
+                obj.formatter = (value, key, item) => value.toString().replace(/\B(?<!\.\d*)(?=(\d{3})+(?!\d))/g, ',');
+                obj.tdClass = 'text-right';
+                obj.thClass = 'text-right';
+              }
+              this.typeTableFields.push(obj);
             });
           }
         })
         .catch((error) => {
-          this.error = error.text ||
+          this.alertMessage = error.text ||
             `Error fetching resource stats for wise.`;
         });
     }

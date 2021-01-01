@@ -183,7 +183,7 @@
                   <b-dropdown-item
                     id="coldefault"
                     @click.stop.prevent="loadColumnConfiguration(-1)">
-                    Moloch Default
+                    Arkime Default
                   </b-dropdown-item>
                   <b-tooltip target="coldefault"
                     placement="right"
@@ -253,7 +253,7 @@
                       <b-dropdown-item
                         id="infodefault"
                         @click.stop.prevent="resetInfoVisibility">
-                        Moloch Default
+                        Arkime Default
                       </b-dropdown-item>
                       <b-tooltip target="infodefault"
                         placement="left"
@@ -600,7 +600,8 @@ export default {
       infoFieldVisMenuOpen: false,
       stickyHeader: false,
       tableHeaderOverflow: undefined,
-      showFitButton: false
+      showFitButton: false,
+      multiviewer: this.$constants.MOLOCH_MULTIVIEWER
     };
   },
   created: function () {
@@ -635,7 +636,8 @@ export default {
         bounding: this.$route.query.bounding || 'last',
         interval: this.$route.query.interval || 'auto',
         view: this.$route.query.view || undefined,
-        expression: this.$store.state.expression || undefined
+        expression: this.$store.state.expression || undefined,
+        cluster: this.$route.query.cluster || undefined
       };
     },
     sorts: {
@@ -722,8 +724,10 @@ export default {
       if (pendingPromise) {
         ConfigService.cancelEsTask(pendingPromise.cancelId)
           .then((response) => {
-            pendingPromise.source.cancel();
-            pendingPromise = null;
+            if (pendingPromise) {
+              pendingPromise.source.cancel();
+              pendingPromise = null;
+            }
 
             if (!runNewQuery) {
               this.loading = false;
@@ -733,7 +737,6 @@ export default {
               }
               return;
             }
-
             this.loadData(updateTable);
           });
       } else if (runNewQuery) {
@@ -785,7 +788,6 @@ export default {
 
       this.stickySessions = [];
     },
-
     /* TABLE SORTING */
     /**
      * Determines if the table is being sorted by specified column
@@ -1361,6 +1363,18 @@ export default {
       this.loading = true;
       this.error = '';
 
+      if (this.multiviewer) {
+        var availableCluster = this.$store.state.esCluster.availableCluster.active;
+        var selection = Utils.checkClusterSelection(this.query.cluster, availableCluster);
+        if (!selection.valid) { // invlaid selection
+          pendingPromise = null;
+          this.sessions.data = undefined;
+          this.error = selection.error;
+          this.dataLoading = false;
+          return;
+        }
+      }
+
       // save expanded sessions
       let expandedSessions = [];
       for (let session of this.stickySessions) {
@@ -1456,7 +1470,7 @@ export default {
     },
     /* Fetches capture stats to show the last time each capture node started */
     getCaptureStats: function () {
-      this.$http.get('stats.json')
+      this.$http.get('api/stats')
         .then((response) => {
           for (let data of response.data.data) {
             this.capStartTimes.push({
